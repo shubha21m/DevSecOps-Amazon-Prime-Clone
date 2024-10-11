@@ -1,0 +1,87 @@
+pipeline{
+    agent any
+    tools{
+        jdk 'jdk17'
+        nodejs 'node14'
+    }
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+    }
+    stages {
+        stage('clean workspace'){
+            steps{
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git'){
+            steps{
+                git branch: 'main', url: 'https://github.com/shubha21m/DevSecOps-Amazon-Prime-Clone.git'
+            }
+        }
+        stage("Sonarqube Analysis "){
+            steps{
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Prime \
+                    -Dsonar.projectKey=Prime '''
+                }
+            }
+        }
+        stage("quality gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
+                }
+            } 
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+        stage("Docker Build & Push"){
+            steps{
+                script{
+                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){   
+                       sh "docker build -t primeclone ."
+                       sh "docker tag primeclone:latest 313452550371.dkr.ecr.ap-south-1.amazonaws.com/app/primeclone:latest"
+                       sh "docker push 313452550371.dkr.ecr.ap-south-1.amazonaws.com/app/primeclone:latest"
+                    }
+                }
+            }
+        }
+        stage("TRIVY Image Scan"){
+            steps{
+                sh "trivy image 313452550371.dkr.ecr.ap-south-1.amazonaws.com/app/primeclone:latest > trivyimage.txt" 
+            }
+        }
+        stage('Deploy to kubernets'){
+            steps{
+                sh """
+                    kubectl --kubeconfig=/var/lib/jenkins/kubeconfig/kubernets-config-file.yaml set image deployments/Prime-Clone-v1 Prime-Clone=313452550371.dkr.ecr.ap-south-1.amazonaws.com/app/primeclone:latest --namespace default
+                """
+            }
+        }
+    }
+    post {
+     always {
+        emailext attachLog: true,
+            subject: "'${currentBuild.result}'",
+            body: "Project: ${env.JOB_NAME}<br/>" +
+                "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                "URL: ${env.BUILD_URL}<br/>",
+            to: 'no-reploy-Skumar@gmail.com',                                #change mail here
+            attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+        }
+    }
+}
